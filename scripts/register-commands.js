@@ -19,12 +19,14 @@ try {
   process.exit(1);
 }
 
-if (config.discord.guildId) {
-  await rest.put(
-    Routes.applicationGuildCommands(config.discord.clientId, config.discord.guildId),
-    { body: commands }
-  );
-  console.log(`Registered ${commands.length} guild commands.`);
+if (config.discord.guildIds.length) {
+  for (const guildId of config.discord.guildIds) {
+    await rest.put(
+      Routes.applicationGuildCommands(config.discord.clientId, guildId),
+      { body: commands }
+    );
+    console.log(`Registered ${commands.length} guild commands for ${guildId}.`);
+  }
 } else {
   await rest.put(
     Routes.applicationCommands(config.discord.clientId),

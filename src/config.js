@@ -32,12 +32,16 @@ function int(name, fallback) {
 }
 
 const root = process.cwd();
+const guildIds = list('DISCORD_GUILD_IDS').length
+  ? list('DISCORD_GUILD_IDS')
+  : list('DISCORD_GUILD_ID');
 
 export const config = {
   discord: {
     token: required('DISCORD_TOKEN'),
     clientId: required('DISCORD_CLIENT_ID'),
-    guildId: process.env.DISCORD_GUILD_ID || null,
+    guildId: guildIds[0] || null,
+    guildIds,
     prefix: process.env.BOT_PREFIX || '!agent',
     allowedChannelIds: new Set(list('ALLOWED_CHANNEL_IDS')),
     allowBotMessages: bool('DISCORD_ALLOW_BOT_MESSAGES', false),

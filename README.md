@@ -24,7 +24,8 @@ This project turns a Discord bot into the client for an AI agent. It supports no
 
    ```bash
    # Ubuntu/Debian
-   sudo apt-get install ffmpeg yt-dlp
+   sudo apt-get install ffmpeg pipx
+   pipx install yt-dlp
    ```
 
    On Windows, install `ffmpeg` and `yt-dlp`, or set `FFMPEG_COMMAND` and `YT_DLP_COMMAND` in `.env`.
@@ -50,7 +51,8 @@ This project turns a Discord bot into the client for an AI agent. It supports no
    npm run register
    ```
 
-   For fast server-only command updates, set `DISCORD_GUILD_ID` in `.env`.
+   For universal multi-server use, leave `DISCORD_GUILD_IDS` empty so commands register globally.
+   For fast updates on selected test servers, set `DISCORD_GUILD_IDS` to comma-separated server IDs.
 
 7. Start the bot:
 
@@ -97,6 +99,32 @@ docker compose down
 
 The Compose setup stores conversation history in `./data` and agent-created files in `./agent_workspace` on the host.
 
+## Media Tool Updates
+
+YouTube extraction changes often, so keep `yt-dlp` fresh. The Docker image installs `yt-dlp` directly from the official GitHub source through `pipx` instead of the older Debian or PyPI package.
+
+To refresh the deployed media tools on Ubuntu:
+
+```bash
+git pull
+docker compose build --pull --no-cache
+docker compose up -d
+docker compose exec discord-agent-bot yt-dlp --version
+```
+
+Or run:
+
+```bash
+sh scripts/update-media-tools.sh
+```
+
+For non-Docker local runs:
+
+```bash
+pipx reinstall yt-dlp --spec "git+https://github.com/yt-dlp/yt-dlp.git"
+yt-dlp --version
+```
+
 ## Discord Usage
 
 - DM the bot directly.
@@ -123,6 +151,17 @@ npm run diagnose:discord
 ```
 
 Make sure the bot was invited with both `bot` and `applications.commands` scopes. The diagnostic output includes an invite URL with those scopes.
+
+## Multi-Server Setup
+
+Leave these values empty for the most universal setup:
+
+```bash
+DISCORD_GUILD_IDS=
+ALLOWED_CHANNEL_IDS=
+```
+
+With that setup, `npm run register` publishes global slash commands, and the bot can work in any server where it has been invited. Use `ALLOWED_CHANNEL_IDS` only when you want to restrict agent responses to specific channels across one or more servers. Use `ADMIN_USER_IDS` for admin users by Discord user ID; those IDs work across servers.
 
 ## Safety Notes
 

@@ -17,7 +17,7 @@ const result = {
   guilds: guilds.map((guild) => ({
     id: guild.id,
     name: guild.name,
-    selectedForGuildCommands: guild.id === config.discord.guildId
+    selectedForGuildCommands: config.discord.guildIds.includes(guild.id)
   })),
   globalCommands: globalCommands.map((command) => ({
     name: command.name,
