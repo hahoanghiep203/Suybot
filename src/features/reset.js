@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } from 'discord.js';
+import { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, MessageFlags } from 'discord.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { exec } from 'node:child_process';
@@ -15,7 +15,7 @@ export const feature = {
   async execute(interaction) {
     // 1. Check permissions
     if (!config.discord.adminUserIds.has(interaction.user.id)) {
-      await interaction.reply({ content: '❌ Unauthorized: Only administrators can run this command.', ephemeral: true });
+      await interaction.reply({ content: '❌ Unauthorized: Only administrators can run this command.', flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -35,7 +35,7 @@ export const feature = {
     const response = await interaction.reply({
       content: '⚠️ **WARNING**: This action will permanently delete all dynamically developed features and their corresponding test files, restoring the bot to its clean state.\nAre you absolutely sure you want to proceed?',
       components: [row],
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
 
     // 3. Collect the response
@@ -89,7 +89,7 @@ export const feature = {
 
         await interaction.followUp({
           content: `✅ **Codebase Reset Completed Successfully!**\n\n**Deleted Features:**\n${deletedFeatures.map(f => `- src/features/${f}`).join('\n') || '- None'}\n\n**Deleted Tests:**\n${deletedTests.map(t => `- test/${t}`).join('\n') || '- None'}\n\n**Discord Sync:**\n\`${regOutput}\`\n\n🔄 **Bot is restarting now...**`,
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
 
         // Trigger Command Process restart by exiting

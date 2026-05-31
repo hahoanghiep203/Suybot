@@ -3,6 +3,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  MessageFlags,
   SlashCommandBuilder
 } from 'discord.js';
 import {
@@ -45,12 +46,14 @@ function createState(guildId) {
     guildId,
     queue: [],
     history: [],
+    loopQueue: [],
     current: null,
     forcedNext: null,
     volume: DEFAULT_VOLUME,
     loop: false,
     textChannelId: null,
     playerMessageId: null,
+    ytdlpProcess: null,
     connection: null,
     ffmpegProcess: null,
     player: createAudioPlayer({
@@ -101,6 +104,7 @@ function displayName(source) {
 
 async function replyToSource(source, payload, { privateReply = false } = {}) {
   const data = typeof payload === 'string' ? { content: payload } : payload;
+  const interactionData = privateReply ? { ...data, flags: MessageFlags.Ephemeral } : data;
 
   if (typeof source.isRepliable === 'function' && source.isRepliable()) {
     if (!privateReply && typeof source.isButton === 'function' && source.isButton()) {
@@ -113,9 +117,9 @@ async function replyToSource(source, payload, { privateReply = false } = {}) {
     if (source.deferred) {
       await source.editReply(data);
     } else if (source.replied) {
-      await source.followUp({ ...data, ephemeral: privateReply });
+      await source.followUp(interactionData);
     } else {
-      await source.reply({ ...data, ephemeral: privateReply });
+      await source.reply(interactionData);
     }
     return;
   }
@@ -337,9 +341,11 @@ function isPlaylistQuery(query) {
   return lowered.includes('list=') || lowered.includes('/playlist?') || lowered.includes('start_radio=1');
 }
 
-function ytdlpArgs(query, { playlist = false, fullPlaylist = false, streamUrlOnly = false } = {}) {
+function ytdlpArgs(query, { playlist = false, fullPlaylist = false } = {}) {
   const args = [
     '--no-warnings',
+    '--source-address',
+    '0.0.0.0',
     '--default-search',
     'ytsearch',
     '--format',
@@ -350,18 +356,40 @@ function ytdlpArgs(query, { playlist = false, fullPlaylist = false, streamUrlOnl
     args.push('--cookies', process.env.YT_DLP_COOKIES);
   }
 
-  if (streamUrlOnly) {
-    args.push('--get-url', '--no-playlist');
-  } else {
-    args.push('--dump-single-json');
-    if (playlist) {
-      args.push('--flat-playlist');
-      if (!fullPlaylist) {
-        args.push('--playlist-end', String(DEFAULT_PLAYLIST_LIMIT));
-      }
-    } else {
-      args.push('--no-playlist');
+  args.push('--dump-single-json');
+  if (playlist) {
+    args.push('--flat-playlist');
+    if (!fullPlaylist) {
+      args.push('--playlist-end', String(DEFAULT_PLAYLIST_LIMIT));
     }
+  } else {
+    args.push('--no-playlist');
+  }
+
+  args.push(query);
+  return args;
+}
+
+function ytdlpPipeArgs(query) {
+  const args = [
+    '--no-warnings',
+    '--source-address',
+    '0.0.0.0',
+    '--default-search',
+    'ytsearch',
+    '--format',
+    'bestaudio/best',
+    '--no-playlist',
+    '--retries',
+    '10',
+    '--fragment-retries',
+    '10',
+    '--output',
+    '-'
+  ];
+
+  if (process.env.YT_DLP_COOKIES) {
+    args.push('--cookies', process.env.YT_DLP_COOKIES);
   }
 
   args.push(query);
@@ -381,20 +409,6 @@ async function runYtdlpJson(query, options) {
   }
 }
 
-async function runYtdlpStreamUrl(query) {
-  try {
-    const { stdout } = await execFileAsync(
-      YTDLP_COMMAND,
-      ytdlpArgs(query, { streamUrlOnly: true }),
-      { maxBuffer: 5 * 1024 * 1024, windowsHide: true }
-    );
-    return stdout.split(/\r?\n/).find((line) => isPlayableStreamUrl(line.trim()))?.trim();
-  } catch (error) {
-    const detail = error.stderr || error.message || String(error);
-    throw new Error(`yt-dlp stream lookup failed: ${detail.trim()}`);
-  }
-}
-
 function webpageUrlFromEntry(entry, fallback) {
   if (entry.webpage_url) return entry.webpage_url;
   if (entry.original_url) return entry.original_url;
@@ -404,28 +418,11 @@ function webpageUrlFromEntry(entry, fallback) {
   return fallback;
 }
 
-function isYoutubePageUrl(value) {
-  try {
-    const hostname = new URL(value).hostname.toLowerCase();
-    return hostname === 'youtube.com'
-      || hostname.endsWith('.youtube.com')
-      || hostname === 'youtu.be'
-      || hostname.endsWith('.youtu.be');
-  } catch {
-    return false;
-  }
-}
-
-function isPlayableStreamUrl(value) {
-  return typeof value === 'string' && value.startsWith('http') && !isYoutubePageUrl(value);
-}
-
 function trackFromInfo(info, requestedBy, fallbackUrl) {
   return {
     title: info.title || 'Unknown title',
     webpageUrl: webpageUrlFromEntry(info, fallbackUrl),
     requestedBy,
-    streamUrl: isPlayableStreamUrl(info.url) ? info.url : null,
     uploader: info.uploader || info.channel || null,
     thumbnailUrl: info.thumbnail || null,
     duration: Number.isFinite(info.duration) ? info.duration : null
@@ -455,24 +452,16 @@ async function extractTracks(query, requestedBy, fullPlaylist = false) {
   };
 }
 
-async function resolveStreamUrl(track) {
-  if (isPlayableStreamUrl(track.streamUrl)) return track.streamUrl;
-
+async function refreshTrackInfo(track) {
   const info = await runYtdlpJson(track.webpageUrl, { playlist: false });
-  const directUrl = isPlayableStreamUrl(info.url) ? info.url : await runYtdlpStreamUrl(track.webpageUrl);
 
-  if (!isPlayableStreamUrl(directUrl)) {
-    throw new Error('yt-dlp returned a YouTube page URL instead of a playable audio stream.');
-  }
-
-  track.streamUrl = directUrl;
   track.title = info.title || track.title;
   track.webpageUrl = info.webpage_url || track.webpageUrl;
   track.uploader = info.uploader || info.channel || track.uploader;
   track.thumbnailUrl = info.thumbnail || track.thumbnailUrl;
   track.duration = Number.isFinite(info.duration) ? info.duration : track.duration;
 
-  return track.streamUrl;
+  return track;
 }
 
 async function ensureVoice(source) {
@@ -501,14 +490,28 @@ async function ensureVoice(source) {
 }
 
 function killFfmpeg(state) {
+  if (state.ytdlpProcess && !state.ytdlpProcess.killed) {
+    state.ytdlpProcess.kill('SIGKILL');
+  }
+  state.ytdlpProcess = null;
+
   if (state.ffmpegProcess && !state.ffmpegProcess.killed) {
     state.ffmpegProcess.kill('SIGKILL');
   }
   state.ffmpegProcess = null;
 }
 
-function createFfmpegResource(state, streamUrl, track) {
+function createFfmpegResource(state, track) {
   killFfmpeg(state);
+
+  const ytdlp = spawn(
+    YTDLP_COMMAND,
+    ytdlpPipeArgs(track.webpageUrl),
+    {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    }
+  );
 
   const ffmpeg = spawn(
     FFMPEG_COMMAND,
@@ -516,14 +519,8 @@ function createFfmpegResource(state, streamUrl, track) {
       '-hide_banner',
       '-loglevel',
       'error',
-      '-reconnect',
-      '1',
-      '-reconnect_streamed',
-      '1',
-      '-reconnect_delay_max',
-      '5',
       '-i',
-      streamUrl,
+      'pipe:0',
       '-vn',
       '-acodec',
       'libopus',
@@ -537,9 +534,30 @@ function createFfmpegResource(state, streamUrl, track) {
     ],
     {
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe']
     }
   );
+
+  ytdlp.stdout.pipe(ffmpeg.stdin);
+
+  ytdlp.stdout.on('error', () => {});
+  ffmpeg.stdin.on('error', () => {});
+
+  ytdlp.stderr.on('data', (chunk) => {
+    const text = chunk.toString().trim();
+    if (text) console.error(`yt-dlp: ${text}`);
+  });
+
+  ytdlp.on('error', (error) => {
+    console.error('Failed to start yt-dlp:', error);
+    state.player.stop(true);
+  });
+
+  ytdlp.on('close', (code, signal) => {
+    if (code && state.ytdlpProcess === ytdlp) {
+      console.error(`yt-dlp exited with code ${code}${signal ? ` signal ${signal}` : ''}`);
+    }
+  });
 
   ffmpeg.stderr.on('data', (chunk) => {
     const text = chunk.toString().trim();
@@ -551,6 +569,16 @@ function createFfmpegResource(state, streamUrl, track) {
     state.player.stop(true);
   });
 
+  ffmpeg.on('close', (code, signal) => {
+    if (code && state.ffmpegProcess === ffmpeg) {
+      console.error(`ffmpeg exited with code ${code}${signal ? ` signal ${signal}` : ''}`);
+    }
+    if (state.ytdlpProcess === ytdlp && !ytdlp.killed) {
+      ytdlp.kill('SIGKILL');
+    }
+  });
+
+  state.ytdlpProcess = ytdlp;
   state.ffmpegProcess = ffmpeg;
 
   const resource = createAudioResource(ffmpeg.stdout, {
@@ -568,32 +596,50 @@ async function playNext(client, guildId) {
 
   const previousTrack = state.current;
   let track = null;
+  let recycledLoopQueue = false;
 
   if (state.forcedNext) {
     track = state.forcedNext;
     state.forcedNext = null;
-  } else if (state.loop && state.current) {
-    track = state.current;
+    state.loopQueue = state.loopQueue.filter((queuedTrack) => queuedTrack !== track);
   } else if (state.queue.length) {
     track = state.queue.shift();
+  } else if (state.loop && previousTrack) {
+    const loopTracks = [...state.loopQueue, previousTrack];
+    state.loopQueue = [];
+    state.queue = loopTracks;
+    track = state.queue.shift();
+    recycledLoopQueue = true;
   }
 
   if (!track) {
+    if (!state.loop) {
+      state.loopQueue = [];
+    }
+    if (previousTrack) {
+      await closePlayerPanel(client, guildId, {
+        title: 'Queue Ended',
+        description: 'Playback ended.'
+      });
+    }
     state.current = null;
     killFfmpeg(state);
     return;
   }
 
-  if (previousTrack && previousTrack !== track && !state.loop) {
+  if (previousTrack && previousTrack !== track) {
     state.history.push(previousTrack);
     state.history = state.history.slice(-50);
+    if (!recycledLoopQueue) {
+      state.loopQueue.push(previousTrack);
+    }
   }
 
   state.current = track;
 
   try {
-    const streamUrl = await resolveStreamUrl(track);
-    const resource = createFfmpegResource(state, streamUrl, track);
+    await refreshTrackInfo(track);
+    const resource = createFfmpegResource(state, track);
     state.connection.subscribe(state.player);
     state.player.play(resource);
     await sendPlayerPanel(client, guildId, track);
@@ -614,6 +660,13 @@ async function sendPlaybackError(client, state, track, error) {
   }
 }
 
+function buildClosedPlayerEmbed({ title, description }) {
+  return new EmbedBuilder()
+    .setColor(0x808080)
+    .setTitle(title)
+    .setDescription(description);
+}
+
 function formatDuration(seconds) {
   if (!seconds) return 'Unknown';
   const total = Math.floor(seconds);
@@ -632,7 +685,7 @@ function buildPlayerEmbed(state, track) {
     .addFields(
       { name: 'Requested by', value: track.requestedBy, inline: true },
       { name: 'Volume', value: `${Math.round(state.volume * 100)}%`, inline: true },
-      { name: 'Loop', value: state.loop ? 'On' : 'Off', inline: true },
+      { name: 'Loop', value: state.loop ? 'Playlist' : 'Off', inline: true },
       { name: 'Duration', value: formatDuration(track.duration), inline: true },
       { name: 'Queued', value: String(state.queue.length), inline: true },
       { name: 'Channel', value: (track.uploader || 'Unknown').slice(0, 1024), inline: true }
@@ -679,6 +732,24 @@ async function sendPlayerPanel(client, guildId, track) {
 
   const message = await channel.send(payload);
   state.playerMessageId = message.id;
+}
+
+async function closePlayerPanel(client, guildId, { title, description }) {
+  const state = stateFor(guildId);
+  if (!state.textChannelId || !state.playerMessageId) return;
+
+  try {
+    const channel = await client.channels.fetch(state.textChannelId);
+    const message = await channel.messages.fetch(state.playerMessageId);
+    await message.edit({
+      embeds: [buildClosedPlayerEmbed({ title, description })],
+      components: []
+    });
+  } catch {
+    // A missing or deleted panel should not block playback cleanup.
+  } finally {
+    state.playerMessageId = null;
+  }
 }
 
 function formatQueue(state, page = 1) {
@@ -810,6 +881,7 @@ async function handleLeave(source) {
   const guild = requireGuild(source);
   const state = stateFor(guild.id);
   state.queue = [];
+  state.loopQueue = [];
   state.current = null;
   state.forcedNext = null;
   killFfmpeg(state);
@@ -855,13 +927,23 @@ async function handlePrevious(source) {
 
   state.queue.unshift(state.current);
   state.forcedNext = state.history.pop();
+  state.loopQueue = state.loopQueue.filter((track) => track !== state.forcedNext);
   state.player.stop(true);
   await replyPublic(source, '⏮️');
 }
 
 async function handleStop(source) {
-  const state = stateFor(requireGuild(source).id);
+  const guild = requireGuild(source);
+  const state = stateFor(guild.id);
+  state.client = sourceClient(source);
+
+  await closePlayerPanel(sourceClient(source), guild.id, {
+    title: 'Stopped',
+    description: `Stopped by **${displayName(source)}**.`
+  });
+
   state.queue = [];
+  state.loopQueue = [];
   state.current = null;
   state.forcedNext = null;
   killFfmpeg(state);
@@ -872,27 +954,32 @@ async function handleStop(source) {
 async function handleClear(source) {
   const state = stateFor(requireGuild(source).id);
   state.queue = [];
+  state.loopQueue = [];
   await replyPublic(source, '🧹 Queue cleared.');
 }
 
 async function handleShuffle(source) {
   const state = stateFor(requireGuild(source).id);
-  if (state.queue.length < 2) {
+  const tracks = state.loop ? [...state.loopQueue, ...state.queue] : state.queue;
+  if (tracks.length < 2) {
     await replyPublic(source, '🔀 Not enough tracks.');
     return;
   }
 
-  for (let index = state.queue.length - 1; index > 0; index -= 1) {
+  for (let index = tracks.length - 1; index > 0; index -= 1) {
     const swapIndex = Math.floor(Math.random() * (index + 1));
-    [state.queue[index], state.queue[swapIndex]] = [state.queue[swapIndex], state.queue[index]];
+    [tracks[index], tracks[swapIndex]] = [tracks[swapIndex], tracks[index]];
   }
-  await replyPublic(source, `🔀 ${state.queue.length}`);
+
+  state.loopQueue = [];
+  state.queue = tracks;
+  await replyPublic(source, `🔀 ${tracks.length}`);
 }
 
 async function handleLoop(source) {
   const state = stateFor(requireGuild(source).id);
   state.loop = !state.loop;
-  await replyPublic(source, `🔁 ${state.loop ? 'On' : 'Off'}`);
+  await replyPublic(source, `🔁 Playlist ${state.loop ? 'On' : 'Off'}`);
 }
 
 async function handleVolume(source, value) {
@@ -937,6 +1024,7 @@ async function handleHelp(source) {
     '**YouTube commands**',
     'Buttons: ⏮️ ⏯️ ⏭️ ⏹️ 🔁 🔀 🎶',
     'Queue replies are private. Other command replies are public.',
+    '`/suy loop` loops the playlist, not only the current song. `/suy shuffle` shuffles the current playlist.',
     '`/suy play query:<url or search>` or `!play <url or search>`',
     `\`!play full <playlist_URL>\` queues a full playlist/radio list. Normal playlist/radio input is limited to ${DEFAULT_PLAYLIST_LIMIT}.`,
     '`/suy queue` or `!queue` opens a paged queue menu.',
@@ -1027,8 +1115,8 @@ export const feature = {
     .addSubcommand((subcommand) => subcommand.setName('next').setDescription('Play the next track.'))
     .addSubcommand((subcommand) => subcommand.setName('stop').setDescription('Stop playback and clear queue.'))
     .addSubcommand((subcommand) => subcommand.setName('clear').setDescription('Clear queued tracks.'))
-    .addSubcommand((subcommand) => subcommand.setName('shuffle').setDescription('Shuffle queued tracks.'))
-    .addSubcommand((subcommand) => subcommand.setName('loop').setDescription('Toggle current-track loop.'))
+    .addSubcommand((subcommand) => subcommand.setName('shuffle').setDescription('Shuffle the current playlist.'))
+    .addSubcommand((subcommand) => subcommand.setName('loop').setDescription('Toggle playlist loop.'))
     .addSubcommand((subcommand) =>
       subcommand
         .setName('volume')
@@ -1112,7 +1200,7 @@ export const feature = {
   async handleButton(interaction) {
     const [, group, action, guildId, rawPage] = interaction.customId.split(':');
     if (guildId !== interaction.guildId) {
-      await interaction.reply({ content: 'This control belongs to another server.', ephemeral: true });
+      await interaction.reply({ content: 'This control belongs to another server.', flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -1126,7 +1214,7 @@ export const feature = {
         await interaction.reply({
           content: queue.content,
           components: queueControls(guildId, queue.page, queue.totalPages),
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -1154,7 +1242,7 @@ export const feature = {
       case 'shuffle':
         return handleShuffle(interaction);
       default:
-        return interaction.reply({ content: 'Unknown control.', ephemeral: true });
+        return interaction.reply({ content: 'Unknown control.', flags: MessageFlags.Ephemeral });
     }
   },
 

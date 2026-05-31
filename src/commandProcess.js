@@ -3,6 +3,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   Partials
 } from 'discord.js';
 import { config } from './config.js';
@@ -132,7 +133,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (error) {
       console.error(`Error executing button ${interaction.customId}:`, error.message);
       if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({ content: `Button failed: ${error.message}`, ephemeral: true });
+        await interaction.reply({ content: `Button failed: ${error.message}`, flags: MessageFlags.Ephemeral });
       }
     }
     return;
@@ -152,7 +153,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       console.error(`Error executing slash command ${commandName}:`, error.message);
       const replyContent = `Execution failed: ${error.message}`;
       if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({ content: replyContent, ephemeral: true });
+        await interaction.reply({ content: replyContent, flags: MessageFlags.Ephemeral });
       } else {
         await interaction.editReply(replyContent);
       }

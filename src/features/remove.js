@@ -1,4 +1,4 @@
-import { SlashCommandBuilder } from 'discord.js';
+import { SlashCommandBuilder, MessageFlags } from 'discord.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { exec } from 'node:child_process';
@@ -21,7 +21,7 @@ export const feature = {
   async execute(interaction) {
     // 1. Check permissions
     if (!config.discord.adminUserIds.has(interaction.user.id)) {
-      await interaction.reply({ content: '❌ Unauthorized: Only administrators can run this command.', ephemeral: true });
+      await interaction.reply({ content: '❌ Unauthorized: Only administrators can run this command.', flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -31,7 +31,7 @@ export const feature = {
     // Core protection list - cannot delete core commands
     const coreFeatures = ['agentHelp', 'reset', 'remove'];
     if (coreFeatures.includes(cleanName)) {
-      await interaction.reply({ content: `❌ Error: Cannot delete core bot command: \`${cleanName}\`.`, ephemeral: true });
+      await interaction.reply({ content: `❌ Error: Cannot delete core bot command: \`${cleanName}\`.`, flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -63,12 +63,12 @@ export const feature = {
     if (!deletedFeature && !deletedTest) {
       await interaction.reply({
         content: `❌ Error: No custom feature or test files found for name \`${cleanName}\`.`,
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
       return;
     }
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     // Sync changes with Discord API
     let regOutput = '';
