@@ -1,0 +1,35 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run YouTube Music Bot",
+      "type": "shell",
+      "command": "${workspaceFolder}/agent_workspace/.venv/Scripts/python.exe",
+      "windows": {
+        "command": "${workspaceFolder}\\agent_workspace\\.venv\\Scripts\\python.exe"
+      },
+      "linux": {
+        "command": "${workspaceFolder}/agent_workspace/.venv/bin/python"
+      },
+      "osx": {
+        "command": "${workspaceFolder}/agent_workspace/.venv/bin/python"
+      },
+      "args": [
+        "agent_workspace/yt_play"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": [],
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    }
+  ]
+}

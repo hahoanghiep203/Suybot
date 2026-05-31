@@ -1,0 +1,11 @@
+services:
+  discord-agent-bot:
+    build:
+      context: .
+    container_name: discord-agent-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./agent_workspace:/app/agent_workspace

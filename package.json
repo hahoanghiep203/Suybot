@@ -1,0 +1,28 @@
+{
+  "name": "discord-agent-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Discord client for an AI agent with bounded local tools.",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:agent": "node src/agentProcess.js",
+    "start:commands": "node src/commandProcess.js",
+    "dev": "node --watch src/index.js",
+    "register": "node scripts/register-commands.js",
+    "diagnose:discord": "node scripts/diagnose-discord.js",
+    "test": "node --test",
+    "check": "node --check src/index.js && node --check src/agent.js && node --check src/config.js && node --check src/help.js && node --check src/memory.js && node --check src/tools.js && node --check src/devTools.js && node --check src/commands.js && node --check src/agentProcess.js && node --check src/commandProcess.js && node --check src/features/ytPlay.js && node --check scripts/register-commands.js && node --check scripts/diagnose-discord.js && node --check test/bot.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.19.2",
+    "@google/genai": "^1.52.0",
+    "discord.js": "^14.15.3",
+    "dotenv": "^16.4.5",
+    "libsodium-wrappers": "^0.8.4"
+  }
+}

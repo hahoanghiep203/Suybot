@@ -1,0 +1,7 @@
+node_modules/
+.env
+data/
+agent_workspace/
+npm-debug.log*
+pnpm-lock.yaml
+yarn.lock
