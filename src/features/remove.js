@@ -29,7 +29,7 @@ export const feature = {
     const cleanName = featureName.endsWith('.js') ? featureName.slice(0, -3) : featureName;
 
     // Core protection list - cannot delete core commands
-    const coreFeatures = ['agentHelp', 'reset', 'remove'];
+    const coreFeatures = ['agentHelp', 'reset', 'remove', 'ytPlay'];
     if (coreFeatures.includes(cleanName)) {
       await interaction.reply({ content: `❌ Error: Cannot delete core bot command: \`${cleanName}\`.`, flags: MessageFlags.Ephemeral });
       return;

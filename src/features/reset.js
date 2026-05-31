@@ -55,7 +55,7 @@ export const feature = {
         const featuresDir = path.resolve(projectRoot, 'src/features');
         const testDir = path.resolve(projectRoot, 'test');
 
-        const coreFeatures = new Set(['agentHelp.js', 'reset.js', 'remove.js']);
+        const coreFeatures = new Set(['agentHelp.js', 'reset.js', 'remove.js', 'ytPlay.js']);
         const coreTests = new Set(['bot.test.js']);
 
         // Remove non-core features
