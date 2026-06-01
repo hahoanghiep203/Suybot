@@ -29,12 +29,16 @@ const DEFAULT_PLAYLIST_LIMIT = Number.parseInt(process.env.YT_PLAYLIST_LIMIT || 
 const DEFAULT_SPOTIFY_LIMIT = Number.parseInt(process.env.SPOTIFY_PLAYLIST_LIMIT || process.env.YT_PLAYLIST_LIMIT || '26', 10);
 const QUEUE_PAGE_SIZE = Number.parseInt(process.env.YT_QUEUE_PAGE_SIZE || '10', 10);
 const DEFAULT_VOLUME = Number.parseFloat(process.env.YT_DEFAULT_VOLUME || '0.2');
+const STOP_DISCONNECT_MS = Number.parseInt(process.env.YT_STOP_DISCONNECT_MS || '10000', 10);
+const IDLE_DISCONNECT_MS = Number.parseInt(process.env.YT_IDLE_DISCONNECT_MS || '60000', 10);
 const PRIVATE_PREFIX_MESSAGES = ['1', 'true', 'yes', 'on'].includes(
   (process.env.YT_PRIVATE_COMMAND_MESSAGES || 'true').toLowerCase()
 );
 const PREFIX_DELETE_MS = Number.parseInt(process.env.YT_PREFIX_DELETE_MS || '20000', 10);
 const YTDLP_COMMAND = process.env.YT_DLP_COMMAND || 'yt-dlp';
 const FFMPEG_COMMAND = process.env.FFMPEG_COMMAND || 'ffmpeg';
+const YTDLP_FORMAT = process.env.YT_DLP_FORMAT || 'bestaudio[ext=webm][acodec=opus]/bestaudio[ext=m4a]/bestaudio/best';
+const OPUS_BITRATE = process.env.YT_OPUS_BITRATE || '160k';
 const MEDIA_TOOL_LOG_LINES = Number.parseInt(process.env.YT_MEDIA_TOOL_LOG_LINES || '5', 10);
 const VERBOSE_MEDIA_TOOL_LOGS = ['1', 'true', 'yes', 'on'].includes(
   (process.env.YT_VERBOSE_MEDIA_TOOL_LOGS || 'false').toLowerCase()
@@ -59,6 +63,7 @@ function createState(guildId) {
     playerMessageId: null,
     ytdlpProcess: null,
     connection: null,
+    disconnectTimer: null,
     ffmpegProcess: null,
     player: createAudioPlayer({
       behaviors: {
@@ -89,6 +94,33 @@ function createState(guildId) {
 
 function stateFor(guildId) {
   return states.get(guildId) || createState(guildId);
+}
+
+function cancelVoiceDisconnect(state) {
+  if (state.disconnectTimer) {
+    clearTimeout(state.disconnectTimer);
+    state.disconnectTimer = null;
+  }
+}
+
+function scheduleVoiceDisconnect(guildId, delayMs) {
+  const state = stateFor(guildId);
+  cancelVoiceDisconnect(state);
+
+  state.disconnectTimer = setTimeout(() => {
+    state.disconnectTimer = null;
+    const latestState = states.get(guildId);
+    if (!latestState || latestState.current || latestState.queue.length || latestState.forcedNext) return;
+
+    killFfmpeg(latestState);
+    latestState.player.stop(true);
+
+    const connection = getVoiceConnection(guildId) || latestState.connection;
+    if (connection) {
+      connection.destroy();
+    }
+    latestState.connection = null;
+  }, Math.max(0, delayMs));
 }
 
 function requireGuild(source) {
@@ -176,11 +208,28 @@ async function replyToSource(source, payload, { privateReply = false } = {}) {
 }
 
 async function replyPublic(source, payload) {
-  await replyToSource(source, payload, { privateReply: true });
+  await replyToSource(source, payload, { privateReply: false });
 }
 
 async function replyPrivate(source, payload) {
   await replyToSource(source, payload, { privateReply: true });
+}
+
+async function acknowledgeSilently(source) {
+  if (typeof source.isRepliable !== 'function' || !source.isRepliable()) return;
+
+  if (typeof source.isButton === 'function' && source.isButton()) {
+    if (!source.deferred && !source.replied) {
+      await source.deferUpdate();
+    }
+    return;
+  }
+
+  if (!source.deferred && !source.replied) {
+    await source.deferReply({ flags: MessageFlags.Ephemeral });
+  }
+
+  await source.deleteReply().catch(() => {});
 }
 
 function parseFullQuery(query, full = false) {
@@ -217,6 +266,20 @@ function parseSpotifyInput(input) {
 
 function spotifyCredentialsConfigured() {
   return Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET);
+}
+
+function normalizeMatchText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\b(official|audio|video|lyrics?|visualizer|remaster(?:ed)?|hd|hq|mv|music)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function meaningfulTokens(value) {
+  return normalizeMatchText(value)
+    .split(/\s+/)
+    .filter((token) => token.length > 1);
 }
 
 async function getSpotifyToken() {
@@ -268,7 +331,16 @@ async function spotifyApi(pathOrUrl) {
 
 function searchFromSpotifyTrack(track) {
   const artists = (track.artists || []).map((artist) => artist.name).filter(Boolean).join(' ');
-  return `${artists} ${track.name} official audio`.trim();
+  const title = track.name || '';
+  const query = `ytsearch8:${artists} ${title} official audio`.trim();
+  return {
+    query,
+    spotify: {
+      title,
+      artists,
+      duration: Number.isFinite(track.duration_ms) ? Math.round(track.duration_ms / 1000) : null
+    }
+  };
 }
 
 async function resolveSpotifyWithOembed(spotify) {
@@ -279,8 +351,8 @@ async function resolveSpotifyWithOembed(spotify) {
 
   const data = await response.json();
   return {
-    queries: [`${data.title || spotify.url} official audio`],
-    notice: 'Spotify API credentials are not set, so I queued the best YouTube match from Spotify embed metadata. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to expand albums/playlists into tracks.'
+    queries: [`ytsearch8:${data.title || spotify.url} official audio`],
+    notice: 'Spotify API credentials are not set, so I matched this Spotify track from embed metadata only. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET for better track/playlist matching.'
   };
 }
 
@@ -319,7 +391,7 @@ async function resolveSpotifyAlbum(id, full) {
 async function resolveSpotifyPlaylist(id, full) {
   const limit = full ? Number.POSITIVE_INFINITY : DEFAULT_SPOTIFY_LIMIT;
   const queries = [];
-  let next = `/playlists/${id}/tracks?limit=50&fields=items(track(type,name,artists(name),is_local)),next,total`;
+  let next = `/playlists/${id}/tracks?limit=50&fields=items(track(type,name,duration_ms,artists(name),is_local)),next,total`;
   let total = 0;
 
   while (next && queries.length < limit) {
@@ -352,6 +424,9 @@ async function resolveSpotifyToYoutubeQueries(query, full = false) {
   }
 
   if (!spotifyCredentialsConfigured()) {
+    if (spotify.type !== 'track') {
+      throw new Error('Spotify album/playlist links require SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET so the bot can expand the track list.');
+    }
     return resolveSpotifyWithOembed(spotify);
   }
 
@@ -381,7 +456,7 @@ function ytdlpArgs(query, { playlist = false, fullPlaylist = false } = {}) {
     '--default-search',
     'ytsearch',
     '--format',
-    'bestaudio/best'
+    YTDLP_FORMAT
   ];
 
   if (process.env.YT_DLP_COOKIES) {
@@ -410,7 +485,7 @@ function ytdlpPipeArgs(query) {
     '--default-search',
     'ytsearch',
     '--format',
-    'bestaudio/best',
+    YTDLP_FORMAT,
     '--no-playlist',
     '--retries',
     '10',
@@ -461,11 +536,63 @@ function trackFromInfo(info, requestedBy, fallbackUrl) {
   };
 }
 
-async function extractTracks(query, requestedBy, fullPlaylist = false) {
+function scoreSpotifyCandidate(entry, spotify) {
+  const candidateTitle = normalizeMatchText(entry.title);
+  const candidateText = normalizeMatchText(`${entry.title || ''} ${entry.uploader || ''} ${entry.channel || ''}`);
+  const targetTitleTokens = meaningfulTokens(spotify.title);
+  const artistTokens = meaningfulTokens(spotify.artists);
+  let score = 0;
+
+  for (const token of targetTitleTokens) {
+    if (candidateTitle.includes(token)) score += 4;
+  }
+
+  for (const token of artistTokens) {
+    if (candidateText.includes(token)) score += 5;
+  }
+
+  const titleText = normalizeMatchText(spotify.title);
+  if (titleText && candidateTitle.includes(titleText)) score += 20;
+
+  if (spotify.duration && Number.isFinite(entry.duration)) {
+    const diff = Math.abs(entry.duration - spotify.duration);
+    if (diff <= 2) score += 25;
+    else if (diff <= 5) score += 15;
+    else if (diff <= 10) score += 5;
+    else if (diff >= 30) score -= 20;
+  }
+
+  const penaltyWords = ['cover', 'karaoke', 'instrumental', 'nightcore', 'sped up', 'slowed', 'reaction'];
+  const targetText = normalizeMatchText(`${spotify.title} ${spotify.artists}`);
+  for (const word of penaltyWords) {
+    if (candidateText.includes(word) && !targetText.includes(word)) score -= 15;
+  }
+
+  if (candidateText.includes('topic') || candidateText.includes('official')) score += 3;
+  return score;
+}
+
+function chooseSpotifyCandidate(entries, spotify) {
+  const candidates = entries.filter(Boolean);
+  if (!spotify || !candidates.length) return candidates[0] || null;
+  return candidates
+    .map((entry) => ({ entry, score: scoreSpotifyCandidate(entry, spotify) }))
+    .sort((a, b) => b.score - a.score)[0]?.entry || candidates[0];
+}
+
+async function extractTracks(query, requestedBy, fullPlaylist = false, match = null) {
   const playlist = isPlaylistQuery(query);
   const info = await runYtdlpJson(query, { playlist, fullPlaylist });
 
   if (Array.isArray(info.entries)) {
+    if (match && !playlist) {
+      const selected = chooseSpotifyCandidate(info.entries, match);
+      return {
+        tracks: selected ? [trackFromInfo(selected, requestedBy, query)] : [],
+        limited: false
+      };
+    }
+
     const entries = playlist ? info.entries : info.entries.slice(0, 1);
     const tracks = entries
       .filter(Boolean)
@@ -507,6 +634,7 @@ async function ensureVoice(source) {
 
   const state = stateFor(guild.id);
   state.client = sourceClient(source);
+  cancelVoiceDisconnect(state);
 
   const connection = joinVoiceChannel({
     channelId: voiceChannel.id,
@@ -556,6 +684,16 @@ function createFfmpegResource(state, track) {
       '-vn',
       '-acodec',
       'libopus',
+      '-application',
+      'audio',
+      '-b:a',
+      OPUS_BITRATE,
+      '-vbr',
+      'on',
+      '-compression_level',
+      '10',
+      '-frame_duration',
+      '20',
       '-f',
       'ogg',
       '-ar',
@@ -665,6 +803,7 @@ async function playNext(client, guildId) {
     }
     state.current = null;
     killFfmpeg(state);
+    scheduleVoiceDisconnect(guildId, IDLE_DISCONNECT_MS);
     return;
   }
 
@@ -677,6 +816,7 @@ async function playNext(client, guildId) {
   }
 
   state.current = track;
+  cancelVoiceDisconnect(state);
 
   try {
     await refreshTrackInfo(track);
@@ -880,7 +1020,19 @@ export async function queueYoutubeQueries(source, queries, options = {}) {
   await ensureVoice(source);
 
   const parsedQueries = queries
-    .map((query) => parseFullQuery(query, fullPlaylist))
+    .map((item) => {
+      if (typeof item === 'object' && item?.query) {
+        return {
+          query: item.query,
+          full: fullPlaylist,
+          match: item.spotify || null
+        };
+      }
+      return {
+        ...parseFullQuery(String(item), fullPlaylist),
+        match: null
+      };
+    })
     .filter((parsed) => parsed.query);
 
   if (!parsedQueries.length) {
@@ -892,7 +1044,7 @@ export async function queueYoutubeQueries(source, queries, options = {}) {
   let limited = false;
 
   for (const parsed of parsedQueries) {
-    const extracted = await extractTracks(parsed.query, displayName(source), parsed.full);
+    const extracted = await extractTracks(parsed.query, displayName(source), parsed.full, parsed.match);
     allTracks.push(...extracted.tracks);
     limited = limited || extracted.limited;
   }
@@ -940,13 +1092,19 @@ async function handlePlay(source, query, fullPlaylist = false) {
 }
 
 async function handleJoin(source) {
+  const guild = requireGuild(source);
   const connection = await ensureVoice(source);
+  const state = stateFor(guild.id);
+  if (!state.current && !state.queue.length) {
+    scheduleVoiceDisconnect(guild.id, IDLE_DISCONNECT_MS);
+  }
   await replyPublic(source, `Joined <#${connection.joinConfig.channelId}>.`);
 }
 
 async function handleLeave(source) {
   const guild = requireGuild(source);
   const state = stateFor(guild.id);
+  cancelVoiceDisconnect(state);
   state.queue = [];
   state.loopQueue = [];
   state.current = null;
@@ -967,11 +1125,11 @@ async function handleTogglePause(source) {
   if (state.player.state.status === AudioPlayerStatus.Paused) {
     state.player.unpause();
     await refreshPlayerPanel(sourceClient(source), requireGuild(source).id);
-    await replyPublic(source, '▶️');
+    await acknowledgeSilently(source);
   } else if (state.player.state.status === AudioPlayerStatus.Playing) {
     state.player.pause();
     await refreshPlayerPanel(sourceClient(source), requireGuild(source).id);
-    await replyPublic(source, '⏸️');
+    await acknowledgeSilently(source);
   } else {
     await replyPublic(source, '🔇 Nothing playing.');
   }
@@ -981,7 +1139,7 @@ async function handleNext(source) {
   const state = stateFor(requireGuild(source).id);
   if (state.player.state.status === AudioPlayerStatus.Playing || state.player.state.status === AudioPlayerStatus.Paused) {
     state.player.stop(true);
-    await replyPublic(source, '⏭️');
+    await acknowledgeSilently(source);
   } else {
     await replyPublic(source, '🔇 Nothing playing.');
   }
@@ -998,7 +1156,7 @@ async function handlePrevious(source) {
   state.forcedNext = state.history.pop();
   state.loopQueue = state.loopQueue.filter((track) => track !== state.forcedNext);
   state.player.stop(true);
-  await replyPublic(source, '⏮️');
+  await acknowledgeSilently(source);
 }
 
 async function handleStop(source) {
@@ -1017,7 +1175,8 @@ async function handleStop(source) {
   state.forcedNext = null;
   killFfmpeg(state);
   state.player.stop(true);
-  await replyPublic(source, '⏹️ Queue cleared.');
+  scheduleVoiceDisconnect(guild.id, STOP_DISCONNECT_MS);
+  await replyPrivate(source, '⏹️ Queue cleared.');
 }
 
 async function handleClear(source) {
@@ -1245,7 +1404,7 @@ export const feature = {
     const subcommand = interaction.options.getSubcommand();
 
     if (subcommand === 'play') {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      await interaction.deferReply();
       return handlePlay(
         interaction,
         interaction.options.getString('query', true),
